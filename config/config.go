@@ -1,87 +1,64 @@
 package config
 
 import (
-	"crypto/tls"
-	"crypto/x509"
 	"os"
 
-	"gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v3"
 )
 
-type KafkaConfig struct {
-	Brokers  []string      `yaml:"brokers"`
-	Consumer ConsumerConfig `yaml:"consumer"`
-	Producer ProducerConfig `yaml:"producer"`
-}
-
-type ConsumerConfig struct {
-    Topics []ConsumerTopicConfig `yaml:"topics"`
-}
-
-type ConsumerTopicConfig struct {
-    Topic      string `yaml:"topic"`
-    GroupID    string `yaml:"group_id"`
-    OutputPath string `yaml:"output_path"`
-}
-
-type ProducerConfig struct {
-    TopicFiles []TopicFile `yaml:"topic_files"`
-}
-
-type TopicFile struct {
-    Topic string `yaml:"topic"`
-    Path  string `yaml:"path"`
-}
-
-type TLSConfig struct {
-	Enabled        bool   `yaml:"enabled"`
-	ClientCertFile string `yaml:"client_cert_file"`
-	ClientKeyFile  string `yaml:"client_key_file"`
-	CACertFile     string `yaml:"ca_cert_file"`
-}
-
+// Config содержит конфигурацию всего приложения.
 type Config struct {
-    Kafka struct {
-        Brokers  []string       `yaml:"brokers"`
-        Producer ProducerConfig `yaml:"producer"`
-        Consumer ConsumerConfig `yaml:"consumer"`
-    } `yaml:"kafka"`
-    TLS TLSConfig `yaml:"tls"`
+	Kafka     KafkaConfig  `yaml:"kafka"`
+	Logging   LoggingConfig `yaml:"logging"`
+	TLSConfig TLSConfig    `yaml:"tls"`
 }
 
+// KafkaConfig содержит конфигурацию Kafka.
+type KafkaConfig struct {
+	Brokers  []string       `yaml:"brokers"`
+	Consumers []ConsumerConfig `yaml:"consumers"`
+	Producers []ProducerConfig `yaml:"producers"`
+}
 
-func LoadConfig(file string) (*Config, error) {
-	data, err := os.ReadFile(file)
+// ConsumerConfig содержит конфигурацию для каждого консьюмера.
+type ConsumerConfig struct {
+	Topic   string `yaml:"topic"`
+	GroupID string `yaml:"group"`
+	Path    string `yaml:"path"`
+}
+
+// ProducerConfig содержит конфигурацию для каждого продюсера.
+type ProducerConfig struct {
+	Topic string `yaml:"topic"`
+	Path  string `yaml:"path"`
+}
+
+// LoggingConfig содержит конфигурацию логирования.
+type LoggingConfig struct {
+	FilePath string `yaml:"file_path"`
+}
+
+// TLSConfig содержит конфигурацию TLS.
+type TLSConfig struct {
+	Enabled    bool   `yaml:"enabled"`
+	CaFile     string `yaml:"ca_file"`
+	CertFile   string `yaml:"cert_file"`
+	KeyFile    string `yaml:"key_file"`
+	Passphrase string `yaml:"passphrase"`
+}
+
+// LoadConfig загружает конфигурацию из файла.
+func LoadConfig(configPath string) (*Config, error) {
+	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, err
 	}
 
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	err = yaml.Unmarshal(data, &cfg)
+	if err != nil {
 		return nil, err
 	}
 
 	return &cfg, nil
-}
-
-func NewTLSConfig(clientCertFile, clientKeyFile, caCertFile string) (*tls.Config, error) {
-	// Загрузка клиентского сертификата
-	cert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
-	if err != nil {
-		return nil, err
-	}
-
-	// Загрузка CA сертификата
-	caCert, err := os.ReadFile(caCertFile)
-	if err != nil {
-		return nil, err
-	}
-
-	caCertPool := x509.NewCertPool()
-	caCertPool.AppendCertsFromPEM(caCert)
-
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      caCertPool,
-	}, nil
 }

@@ -1,131 +1,103 @@
 package consumer
 
 import (
+	"bytes"
 	"context"
-	"log"
-	"sync"
-	"crypto/tls"
 	"fmt"
+	"log"
 	"os"
-	"strconv"
 	"path/filepath"
+	// "strconv"
+	"sync"
+	"time"
+    "crypto/tls"
 
 	"github.com/IBM/sarama"
+	// "github.com/prometheus/client_golang/prometheus"
 	"github.com/smutosey/kafka-client/config"
+	"github.com/smutosey/kafka-client/pkg/metrics"
 )
+
 type Consumer struct {
-    consumers map[string]sarama.ConsumerGroup
-    topicConfigs []config.ConsumerTopicConfig
-    tlsConfig *tls.Config
+	consumerGroup sarama.ConsumerGroup
+	config        *config.ConsumerConfig
 }
 
-func NewConsumer(brokers []string, topicConfigs []config.ConsumerTopicConfig, tlsConfig *tls.Config) (*Consumer, error) {
-    config := sarama.NewConfig()
-    if tlsConfig != nil {
-        config.Net.TLS.Enable = true
-        config.Net.TLS.Config = tlsConfig
-    }
+func NewConsumer(brokers []string, consumerConfig *config.ConsumerConfig, tlsConfig *tls.Config) (*Consumer, error) {
+	config := sarama.NewConfig()
+	config.Consumer.Return.Errors = true
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
 
-    consumers := make(map[string]sarama.ConsumerGroup)
-    for _, tc := range topicConfigs {
-        consumer, err := sarama.NewConsumerGroup(brokers, tc.GroupID, config)
-        if err != nil {
-            return nil, err
-        }
-        consumers[tc.Topic] = consumer
-    }
+	if tlsConfig != nil {
+		config.Net.TLS.Enable = true
+		config.Net.TLS.Config = tlsConfig
+	}
 
-    return &Consumer{consumers: consumers, topicConfigs: topicConfigs, tlsConfig: tlsConfig}, nil
-}
+	consumerGroup, err := sarama.NewConsumerGroup(brokers, consumerConfig.GroupID, config)
+	if err != nil {
+		return nil, err
+	}
 
-func (c *Consumer) Close() error {
-    var err error
-    for _, consumer := range c.consumers {
-        if e := consumer.Close(); e != nil {
-            err = e
-        }
-    }
-    return err
+	return &Consumer{
+		consumerGroup: consumerGroup,
+		config:        consumerConfig,
+	}, nil
 }
 
 func (c *Consumer) Start(ctx context.Context, wg *sync.WaitGroup) {
-    defer wg.Done()
-    for _, tc := range c.topicConfigs {
-        go c.consumeMessages(ctx, tc)
-    }
+	defer wg.Done()
+
+	handler := consumerGroupHandler{config: c.config}
+
+	for {
+		if err := c.consumerGroup.Consume(ctx, []string{c.config.Topic}, &handler); err != nil {
+			log.Printf("Ошибка при обработке сообщений: %v", err)
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+	}
 }
 
-func (c *Consumer) consumeMessages(ctx context.Context, tc config.ConsumerTopicConfig) {
-    handler := &messageHandler{
-        outputPath: tc.OutputPath,
-    }
-
-    for {
-        select {
-        case <-ctx.Done():
-            return
-        default:
-            log.Printf("Подключение к топику: %s, группа: %s", tc.Topic, tc.GroupID)
-            consumer, exists := c.consumers[tc.Topic]
-            if !exists {
-                log.Printf("Консьюмер для топика %s не найден", tc.Topic)
-                return
-            }
-
-            if err := consumer.Consume(ctx, []string{tc.Topic}, handler); err != nil {
-                log.Printf("Ошибка при потреблении сообщений из топика %s: %v", tc.Topic, err)
-            }
-        }
-    }
+type consumerGroupHandler struct {
+	config *config.ConsumerConfig
 }
 
-type messageHandler struct {
-    outputPath string
+func (h *consumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error {
+	return nil
 }
 
-func (h *messageHandler) Setup(sarama.ConsumerGroupSession) error   { return nil }
-func (h *messageHandler) Cleanup(sarama.ConsumerGroupSession) error { return nil }
-
-func (h *messageHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
-    fileData := make(map[string][]byte)
-    for msg := range claim.Messages() {
-        fileName := fmt.Sprintf("%s/%d-%s", h.outputPath, msg.Partition, strconv.Itoa(int(msg.Offset)))
-        fileData[fileName] = append(fileData[fileName], msg.Value...)
-
-        log.Printf("Получено сообщение из топика %s: %s", msg.Topic, string(msg.Value))
-        session.MarkMessage(msg, "")
-    }
-
-    for fileName, data := range fileData {
-        if err := h.saveToFile(fileName, data); err != nil {
-            log.Printf("Ошибка при сохранении файла %s: %v", fileName, err)
-        } else {
-            log.Printf("Файл сохранен: %s", fileName)
-        }
-    }
-    return nil
+func (h *consumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error {
+	return nil
 }
 
-func (h *messageHandler) saveToFile(fileName string, data []byte) error {
-    filePath := filepath.Join(h.outputPath, fileName)
-    if err := os.WriteFile(filePath, data, 0644); err != nil {
-        return err
-    }
+func (h *consumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	fileBuffers := make(map[string]*bytes.Buffer)
 
-    // Дополнительная проверка размера
-    origSize, err := getOriginalFileSize(filePath) // Эту функцию нужно реализовать
-    if err != nil {
-        return err
-    }
-    savedSize := int64(len(data))
-    if savedSize != origSize {
-        return fmt.Errorf("размеры файлов не совпадают: ожидалось %d, получено %d", origSize, savedSize)
-    }
+	for msg := range claim.Messages() {
+		filename := fmt.Sprintf("%s-%d-%d", msg.Topic, msg.Partition, msg.Offset)
+		buffer, exists := fileBuffers[filename]
+		if !exists {
+			buffer = new(bytes.Buffer)
+			fileBuffers[filename] = buffer
+		}
 
-    return nil
-}
+		buffer.Write(msg.Value)
+		session.MarkMessage(msg, "")
+		metrics.ConsumedMessages.WithLabelValues(msg.Topic).Inc()
+	}
 
-func getOriginalFileSize(filePath string) (int64, error) {
-    // Реализуйте функцию для получения размера оригинального файла
-    return 0, nil
+	for filename, buffer := range fileBuffers {
+		filePath := filepath.Join(h.config.Path, filename)
+		if err := os.WriteFile(filePath, buffer.Bytes(), 0644); err != nil {
+			log.Printf("Ошибка при записи файла %s: %v", filePath, err)
+			continue
+		}
+
+		log.Printf("Файл успешно записан: %s", filePath)
+		metrics.FileProcessingTime.WithLabelValues(h.config.Topic).Observe(float64(time.Now().UnixNano()))
+	}
+
+	return nil
 }

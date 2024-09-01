@@ -1,95 +1,90 @@
 package producer
 
 import (
-    "crypto/tls"
-    // "fmt"
-    "log"
-    "os"
-    "path/filepath"
-    "time"
+	"crypto/tls"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+	"context"
+	"sync"
 
-    "github.com/IBM/sarama"
-    "github.com/smutosey/kafka-client/internal/metrics"
+	"github.com/IBM/sarama"
 	"github.com/smutosey/kafka-client/config"
+	"github.com/smutosey/kafka-client/pkg/metrics"
 )
 
 type Producer struct {
-    producer  sarama.SyncProducer
-    topicFiles []config.TopicFile
-    tlsConfig  *tls.Config
+	producer sarama.SyncProducer
+	config   *config.ProducerConfig
 }
 
-func NewProducer(brokers []string, topicFiles []config.TopicFile, tlsConfig *tls.Config) (*Producer, error) {
-    config := sarama.NewConfig()
-    if tlsConfig != nil {
-        config.Net.TLS.Enable = true
-        config.Net.TLS.Config = tlsConfig
-    }
-    prod, err := sarama.NewSyncProducer(brokers, config)
-    if err != nil {
-        return nil, err
-    }
-    return &Producer{producer: prod, topicFiles: topicFiles, tlsConfig: tlsConfig}, nil
+func NewProducer(brokers []string, producerConfig *config.ProducerConfig, tlsConfig *tls.Config) (*Producer, error) {
+	config := sarama.NewConfig()
+	config.Producer.RequiredAcks = sarama.WaitForAll
+	config.Producer.Retry.Max = 5
+	config.Producer.Return.Successes = true
+
+	if tlsConfig != nil {
+		config.Net.TLS.Enable = true
+		config.Net.TLS.Config = tlsConfig
+	}
+
+	producer, err := sarama.NewSyncProducer(brokers, config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Producer{
+		producer: producer,
+		config:   producerConfig,
+	}, nil
 }
 
-func (p *Producer) Close() error {
-    return p.producer.Close()
+func (p *Producer) Start(ctx context.Context, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			files, err := os.ReadDir(p.config.Path)
+			if err != nil {
+				log.Printf("Ошибка при чтении директории: %v", err)
+				continue
+			}
+
+			for _, file := range files {
+				if err := p.sendFile(filepath.Join(p.config.Path, file.Name())); err != nil {
+					log.Printf("Ошибка при отправке файла: %v", err)
+				}
+			}
+		}
+	}
 }
 
-func (p *Producer) MonitorAndSend() {
-    for _, tf := range p.topicFiles {
-        go p.monitorAndSendFiles(tf.Topic, tf.Path)
-    }
-}
+func (p *Producer) sendFile(filePath string) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return err
+	}
 
-func (p *Producer) monitorAndSendFiles(topic, path string) {
-    log.Printf("Начало мониторинга каталога: %s для топика: %s", path, topic)
+	msg := &sarama.ProducerMessage{
+		Topic: p.config.Topic,
+		Value: sarama.ByteEncoder(data),
+	}
 
-    for {
-        files, err := os.ReadDir(path)
-        if err != nil {
-            log.Printf("Ошибка при чтении каталога: %v", err)
-            time.Sleep(10 * time.Second)
-            continue
-        }
+	_, _, err = p.producer.SendMessage(msg)
+	if err != nil {
+		return err
+	}
 
-        for _, file := range files {
-            if file.IsDir() {
-                continue
-            }
-            filePath := filepath.Join(path, file.Name())
-            log.Printf("Обработка файла: %s", filePath)
+	log.Printf("Файл успешно отправлен: %s", filePath)
+	metrics.ProducedMessages.WithLabelValues(p.config.Topic).Inc()
 
-            content, err := os.ReadFile(filePath)
-            if err != nil {
-                log.Printf("Ошибка при чтении файла: %v", err)
-                continue
-            }
-
-            message := &sarama.ProducerMessage{
-                Topic: topic,
-                Value: sarama.ByteEncoder(content),
-            }
-
-            start := time.Now()
-            _, _, err = p.producer.SendMessage(message)
-            duration := time.Since(start).Seconds()
-
-            if err != nil {
-                log.Printf("Ошибка при отправке сообщения: %v", err)
-                metrics.IncProcessedFiles("failure")
-            } else {
-                log.Printf("Сообщение отправлено в топик %s", topic)
-                metrics.IncProcessedFiles("success")
-            }
-
-            metrics.ObserveFileProcessingDuration("send_message", duration)
-            err = os.Remove(filePath)
-            if err != nil {
-                log.Printf("Ошибка при удалении файла: %v", err)
-            }
-        }
-
-        time.Sleep(10 * time.Second)
-    }
+	return nil
 }
