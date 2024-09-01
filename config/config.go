@@ -15,12 +15,22 @@ type KafkaConfig struct {
 }
 
 type ConsumerConfig struct {
-	GroupID string   `yaml:"group_id"`
-	Topics  []string `yaml:"topics"`
+    Topics []ConsumerTopicConfig `yaml:"topics"`
+}
+
+type ConsumerTopicConfig struct {
+    Topic      string `yaml:"topic"`
+    GroupID    string `yaml:"group_id"`
+    OutputPath string `yaml:"output_path"`
 }
 
 type ProducerConfig struct {
-	Topic string `yaml:"topic"`
+    TopicFiles []TopicFile `yaml:"topic_files"`
+}
+
+type TopicFile struct {
+    Topic string `yaml:"topic"`
+    Path  string `yaml:"path"`
 }
 
 type TLSConfig struct {
@@ -31,9 +41,14 @@ type TLSConfig struct {
 }
 
 type Config struct {
-	Kafka KafkaConfig `yaml:"kafka"`
-	TLS   TLSConfig   `yaml:"tls"`
+    Kafka struct {
+        Brokers  []string       `yaml:"brokers"`
+        Producer ProducerConfig `yaml:"producer"`
+        Consumer ConsumerConfig `yaml:"consumer"`
+    } `yaml:"kafka"`
+    TLS TLSConfig `yaml:"tls"`
 }
+
 
 func LoadConfig(file string) (*Config, error) {
 	data, err := os.ReadFile(file)

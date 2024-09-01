@@ -1,4 +1,4 @@
-module github.com/myuser/kafka-service
+module github.com/smutosey/kafka-client
 
 go 1.23
 

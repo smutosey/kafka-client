@@ -1,0 +1,27 @@
+kafka:
+  brokers:
+    - broker1:9092
+    - broker2:9092
+
+log:
+  path: /var/log/kafka-client.log
+
+consumers:
+  - topic: topic1
+    group: group1
+    save_path: /path/to/save/files1
+  - topic: topic2
+    group: group2
+    save_path: /path/to/save/files2
+
+producers:
+  - topic: topic1
+    read_path: /path/to/read/files1
+  - topic: topic2
+    read_path: /path/to/read/files2
+
+tls:
+  enable: true
+  cert_file: /path/to/cert.pem
+  key_file: /path/to/key.pem
+  ca_file: /path/to/ca.pem
